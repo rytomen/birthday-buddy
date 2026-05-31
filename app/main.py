@@ -1,12 +1,21 @@
 import json
 import os
+import time
 from datetime import date
 
-from flask import Flask, jsonify, request
+from flask import Flask, Response, g, jsonify, request
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from app.birthdays import upcoming
 from app.cache import Cache
 from app.db import init_db, make_engine, make_session_factory
+from app.metrics import (
+    active_requests,
+    friends_added_total,
+    friends_total,
+    http_request_duration_seconds,
+    http_requests_total,
+)
 from app.models import Friend
 
 
@@ -16,6 +25,34 @@ def create_app(database_url=None, redis_url=None):
     init_db(engine)
     session_factory = make_session_factory(engine)
     cache = Cache(redis_url)
+
+    def count_friends():
+        session = session_factory()
+        try:
+            return session.query(Friend).count()
+        finally:
+            session.close()
+
+    @app.before_request
+    def _start_timer():
+        g.start_time = time.time()
+        active_requests.inc()
+
+    @app.after_request
+    def _record_metrics(response):
+        endpoint = request.url_rule.rule if request.url_rule else request.path
+        duration = time.time() - getattr(g, "start_time", time.time())
+        http_request_duration_seconds.labels(endpoint).observe(duration)
+        http_requests_total.labels(
+            request.method, endpoint, str(response.status_code)
+        ).inc()
+        active_requests.dec()
+        return response
+
+    @app.get("/metrics")
+    def metrics():
+        friends_total.set(count_friends())
+        return Response(generate_latest(), mimetype=CONTENT_TYPE_LATEST)
 
     @app.get("/health")
     def health():
@@ -54,6 +91,7 @@ def create_app(database_url=None, redis_url=None):
         finally:
             session.close()
         cache.delete("upcoming")
+        friends_added_total.inc()
         return jsonify(result), 201
 
     @app.get("/api/upcoming")
