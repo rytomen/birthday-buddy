@@ -1,0 +1,110 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  secret-detection:
+    name: Secret Detection (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install gitleaks
+        run: |
+          curl -sSfL -o gitleaks.tar.gz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.18.4/gitleaks_8.18.4_linux_x64.tar.gz
+          tar -xzf gitleaks.tar.gz gitleaks
+          sudo mv gitleaks /usr/local/bin/
+      - name: Run gitleaks (full history)
+        run: |
+          gitleaks detect --source . --config gitleaks.toml \
+            --report-format json --report-path gitleaks-report.json \
+            --redact --exit-code 1
+      - name: Upload gitleaks report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-report
+          path: gitleaks-report.json
+
+  sca-scan:
+    name: SCA (Trivy filesystem)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Trivy FS report (JSON, все уровни)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: json
+          output: trivy-fs-report.json
+          severity: CRITICAL,HIGH,MEDIUM,LOW
+          exit-code: '0'
+      - name: Upload FS report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-fs-report
+          path: trivy-fs-report.json
+      - name: Trivy FS gate (блок при CRITICAL/HIGH)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+
+  sbom:
+    name: SBOM (Syft)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate SBOM (CycloneDX)
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: sbom.json
+      - name: Upload SBOM
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.json
+
+  image-scan:
+    name: Image Scan (Trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t birthday-buddy:scan .
+      - name: Trivy image report (JSON, все уровни)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: birthday-buddy:scan
+          format: json
+          output: trivy-image-report.json
+          severity: CRITICAL,HIGH,MEDIUM,LOW
+          exit-code: '0'
+      - name: Upload image report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-image-report
+          path: trivy-image-report.json
+      - name: Trivy image gate (блок при CRITICAL/HIGH)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: birthday-buddy:scan
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: '1'
